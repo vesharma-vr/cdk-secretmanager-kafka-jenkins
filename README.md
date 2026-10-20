@@ -298,72 +298,33 @@ rm -rf .venv cdk.out
 
 (Keep `cdk.context.json` — it's meant to be committed.)
 
-## CI/CD with Jenkins
+## CI with Jenkins
 
-The [`Jenkinsfile`](Jenkinsfile) automates Steps 1–8 above (`ACTION=deploy`) and Step 9
-(`ACTION=destroy`). Every stage runs inside the agent
-image in [`ci/Dockerfile`](ci/Dockerfile), which pins Node 24, the AWS CDK CLI (2.1145.0),
-Python 3, the AWS CLI v2 and jq. The only requirement for a Jenkins node is that it can run
+The [`Jenkinsfile`](Jenkinsfile) runs the unit tests on every build. It needs no AWS
+credentials and never deploys or destroys anything; deploys (Steps 1–8) and clean-up (Step 9)
+are done by hand. Every stage runs inside the agent image in [`ci/Dockerfile`](ci/Dockerfile),
+which pins Node 24 and Python 3. The only requirement for a Jenkins node is that it can run
 Docker.
 
 ```
-Build & Verify ─────────────────────────────────────────────►  Approve  ─►  Deploy & Verify ─────────────►
-Install → Unit tests → Synth → Static analysis → Diff          (manual)     cdk deploy → Smoke test
-(pytest)   (context-drift check)   (cfn-lint)   (bootstrap check)            (stashed cdk.out)  (SSM)
+Install → Unit tests
+          (pytest)
 ```
 
-| Stage | What it does | Fails / blocks when |
+| Stage | What it does | Fails when |
 |---|---|---|
-| Install | venv + `requirements-dev.txt` (pytest, cfn-lint) | — |
+| Install | venv + `requirements-dev.txt` | install error |
 | Unit tests | [`tests/`](tests/test_kafka_cluster_stack.py): offline synth from `cdk.context.json`; asserts 1×t3.small, no key pair, only 9092 open, generated secret, secret-scoped IAM, no password in traced user data | any assertion fails |
-| Synth | `cdk synth` | synth error; **UNSTABLE** (deploy blocked) if synth had to do a fresh VPC lookup and changed `cdk.context.json`. Commit the archived `reports/cdk.context.json` |
-| Static analysis | `cfn-lint` on the synthesized template | cfn-lint *errors* (warnings are only reported) |
-| Diff | checks the `CDKToolkit` bootstrap stack exists, then `cdk diff` → `reports/cdk-diff.txt` | not bootstrapped |
-| Approve | manual `input`, 30 min timeout, holds no executor | rejected / timed out |
-| Deploy | `cdk deploy --app cdk.out`: deploys the **exact** assembly that was linted and diffed, not a re-synth | CloudFormation failure |
-| Smoke test | [`scripts/smoke_test.sh`](scripts/smoke_test.sh) over SSM Run Command: waits for SSM Online and for cloud-init + `kafka.service`, then does an authenticated create/produce/consume round-trip and confirms an **unauthenticated** client is rejected | any check fails |
 
-Branches and PRs (in a multibranch job) run **Build & Verify** only. Approve, Deploy and Destroy
-run only on `main`, or in a plain single-branch Pipeline job. `disableConcurrentBuilds()` keeps
-two builds from touching the stack at once.
-
-**Parameters**
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `ACTION` | `deploy` | `deploy`, `plan` (stop after diff), or `destroy` |
-| `AWS_CREDENTIALS_ID` | `aws-kafka-deployer` | Jenkins *AWS Credentials* id; empty = use the agent's IAM role / env credentials |
-| `SKIP_APPROVAL` | `false` | skip the manual gate |
-| `RUN_SMOKE_TESTS` | `true` | run `scripts/smoke_test.sh` after deploy |
-| `FORCE_DELETE_SECRET` | `false` | on destroy, purge the broker secret so you can redeploy immediately (see the Secrets Manager gotcha above) |
-
-`destroy` asks you to type the stack name, runs `cdk destroy`, checks the stack is gone, and
-optionally purges the secret.
+The JUnit report is published to the build and archived under `reports/`.
 
 ### Jenkins setup
 
-1. **Plugins:** Pipeline, Docker Pipeline, CloudBees AWS Credentials, JUnit, Timestamper
-   (all standard).
-2. **Credential:** add an *AWS Credentials* entry with id `aws-kafka-deployer`. If your agents
-   already run with an IAM role, leave `AWS_CREDENTIALS_ID` empty instead.
-3. **Job:** create a *Multibranch Pipeline* (or a *Pipeline* from SCM) pointing at this repo.
-   It picks up `Jenkinsfile` from the root. Parameters appear after the first run.
-4. **Bootstrap** the account/region once (Step 2). The pipeline checks for it but never
-   bootstraps, because bootstrapping is an account-level decision.
+1. **Plugins:** Pipeline, Docker Pipeline, JUnit, Timestamper (all standard).
+2. **Job:** create a *Multibranch Pipeline* (or a *Pipeline* from SCM) pointing at this repo.
+   It picks up `Jenkinsfile` from the root.
 
-**IAM for the Jenkins principal.** CDK does the actual deploy through the bootstrap roles, so
-the principal only needs:
-
-- `sts:AssumeRole` on `arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-*-<ACCOUNT_ID>-us-east-1`
-  (deploy, lookup, file-publishing roles)
-- `cloudformation:DescribeStacks` (bootstrap preflight, post-destroy check)
-- `ssm:SendCommand` on the `AWS-RunShellScript` document and on instances tagged
-  `Project=kafka-simple-no-msk`, plus `ssm:GetCommandInvocation` and
-  `ssm:DescribeInstanceInformation` (smoke test)
-- `secretsmanager:DeleteSecret` on `kafka-simple-cdk-broker-credentials-*`, only if you use
-  `FORCE_DELETE_SECRET`
-
-To run the smoke test by hand after a local deploy:
+To run the smoke test after a local deploy:
 
 ```bash
 npx aws-cdk@2 deploy --require-approval never --outputs-file cdk-outputs.json
