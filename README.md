@@ -100,7 +100,7 @@ implementations, not just a styling choice.
 ## Step 1 — Set up the Python environment
 
 ```bash
-cd cdk-secretmanager-kafka
+cd cdk-secretmanager-kafka-jenkins
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate.bat
 pip install -r requirements.txt
